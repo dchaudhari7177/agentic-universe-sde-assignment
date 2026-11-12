@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--public-host", default=None, help="host the provider should call back (default --host)")
     run.add_argument("--window-guard", type=float, default=60.0,
                      help="sim seconds before a window closes after which no new call starts")
-    run.add_argument("--latency-budget", type=float, default=0.2,
+    run.add_argument("--latency-budget", type=float, default=0.5,
                      help="real seconds of request latency to allow for at window close (scaled by speed)")
     run.add_argument("--callback-lookahead", type=float, default=360.0,
                      help="sim seconds ahead to reserve tenant slots for due callbacks (0 disables)")

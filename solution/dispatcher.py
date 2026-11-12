@@ -30,7 +30,7 @@ from .store import Store, to_dt
 class Settings:
     callback_url: str = "http://127.0.0.1:8200/webhooks/telephony"
     window_guard_s: float = 60.0          # don't start a call in the last N sim seconds of a window...
-    latency_budget_real_s: float = 0.2    # ...or in the last (this many real seconds x speed), if longer
+    latency_budget_real_s: float = 0.5    # ...or in the last (this many real seconds x speed), if longer
     callback_lookahead_s: float = 360.0   # hold a slot for callbacks due within N sim seconds
     poll_after_s: float = 180.0           # sim seconds without a result before we poll the call
     poll_every_real_s: float = 0.25       # then poll it at most this often (real seconds)
@@ -56,8 +56,8 @@ class Dispatcher:
         self.resolving: set[str] = set()
         self.tasks: set[asyncio.Task] = set()
         self.wake = asyncio.Event()
-        # The provider checks the window when our request *arrives*. At 600x, 0.2 real seconds of
-        # latency is 2 simulated minutes, so the guard scales with the clock speed.
+        # The provider checks the window when our request *arrives*. At 600x, 0.5 real seconds of
+        # latency is 5 simulated minutes, so the guard scales with the clock speed.
         self.guard = timedelta(seconds=max(self.s.window_guard_s, clock.sim_seconds(self.s.latency_budget_real_s)))
         self.stats = {"placed": 0, "http_503": 0, "unknown": 0, "rejected": 0, "polled_results": 0,
                       "recovered_intents": 0, "skipped_window_closed": 0}
