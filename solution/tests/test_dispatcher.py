@@ -229,3 +229,33 @@ def test_slot_is_held_for_an_imminent_callback(store, cfg, clock):
     clock.current = soon
     got = [a for a in d.dispatch_once(clock.now()) if a["tenant_id"] == "zen"]
     assert [a["lead_id"] for a in got] == ["z1"]
+
+
+def test_callback_outside_window_is_dialled_at_next_opening(store, cfg, clock):
+    """R6: callback_at after close -> first instant of the next window, ahead of everything else."""
+    d = make(store, cfg, clock, FakeProvider())
+    store.conn.execute("UPDATE leads SET eligible_at=1e12 WHERE campaign_id='c_feedback'")
+    cb = ist(2026, 11, 12, 20, 15)                 # renewals closed at 19:00 Thursday
+    store.conn.execute("UPDATE leads SET queue='callback', eligible_at=? WHERE lead_id='r3'", (cb.timestamp(),))
+
+    clock.current = ist(2026, 11, 12, 20, 16)
+    assert [a for a in d.dispatch_once(clock.now()) if a["tenant_id"] == "acme"] == []
+    clock.current = ist(2026, 11, 13, 9, 59, 59)
+    assert [a for a in d.dispatch_once(clock.now()) if a["tenant_id"] == "acme"] == []
+    clock.current = ist(2026, 11, 13, 10, 0)       # Friday opening: the callback goes first
+    got = [a["lead_id"] for a in d.dispatch_once(clock.now()) if a["tenant_id"] == "acme"]
+    assert got[0] == "r3"
+
+
+def test_retry_waits_exactly_until_eligible(store, cfg, clock):
+    """R5 end to end: a no_answer at 12:00 is not redialled at 12:59:59, and is at 13:00."""
+    clock.current = ist(2026, 11, 13, 12, 0)
+    d = make(store, cfg, clock, FakeProvider())
+    store.conn.execute("UPDATE leads SET eligible_at=1e12 WHERE lead_id <> 'z2'")
+    a = d.dispatch_once(clock.now())[0]
+    store.mark_accepted(a["request_id"], "CA1", clock.now(), "post")
+    store.apply_result(result(a, status="no_answer", ended=clock.now(), call_sid="CA1"), clock.now(), "webhook")
+    clock.current = ist(2026, 11, 13, 12, 59, 59)
+    assert d.dispatch_once(clock.now()) == []
+    clock.current = ist(2026, 11, 13, 13, 0)
+    assert [x["lead_id"] for x in d.dispatch_once(clock.now())] == ["z2"]
