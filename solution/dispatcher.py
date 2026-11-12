@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -41,6 +42,9 @@ class Settings:
     unknown_settle_real_s: float = 0.5    # wait before looking up a request whose response we lost
     retry_503_s: float = 30.0             # sim seconds before re-trying a lead after a 503
     rejected_backoff_s: float = 1800.0    # sim seconds after an (unexpected) 4xx rule rejection
+    lag_window: int = 50                  # adaptive guard: look at the last N accepted calls...
+    lag_safety: float = 1.25              # ...and keep this multiple of the worst lag among them
+    max_guard_s: float = 3600.0           # never stop dialling more than an hour before close
 
 
 class Dispatcher:
@@ -57,8 +61,11 @@ class Dispatcher:
         self.tasks: set[asyncio.Task] = set()
         self.wake = asyncio.Event()
         # The provider checks the window when our request *arrives*. At 600x, 0.5 real seconds of
-        # latency is 5 simulated minutes, so the guard scales with the clock speed.
-        self.guard = timedelta(seconds=max(self.s.window_guard_s, clock.sim_seconds(self.s.latency_budget_real_s)))
+        # latency is 5 simulated minutes, so the base guard scales with the clock speed...
+        self.base_guard_s = max(self.s.window_guard_s, clock.sim_seconds(self.s.latency_budget_real_s))
+        # ...and widens to cover the latency we actually observe (seeded from the DB, so it
+        # survives a restart).
+        self.recent_lags: deque[float] = deque(store.recent_accept_lags(self.s.lag_window), maxlen=self.s.lag_window)
         self.stats = {"placed": 0, "http_503": 0, "unknown": 0, "rejected": 0, "polled_results": 0,
                       "recovered_intents": 0, "skipped_window_closed": 0}
         self.last_polled: dict[str, float] = {}  # request_id -> real time; losing it on a crash is harmless
@@ -67,6 +74,12 @@ class Dispatcher:
         self.transit_lag: list[float] = []
 
     # ------------------------------------------------------------------ scheduling
+    @property
+    def guard(self) -> timedelta:
+        """How long before a window closes we stop *starting* calls (R1)."""
+        observed = self.s.lag_safety * max(self.recent_lags, default=0.0)
+        return timedelta(seconds=min(self.s.max_guard_s, max(self.base_guard_s, observed)))
+
     def dialable_campaigns(self, now: datetime) -> dict[str, set[str]]:
         out: dict[str, set[str]] = {t: set() for t in self.cfg.tenants}
         for c in self.cfg.campaigns.values():
@@ -121,6 +134,7 @@ class Dispatcher:
             out = await self.provider.place(rid, a["campaign_id"], a["lead_id"], a["phone"], self.s.callback_url)
             if out.kind == "accepted":
                 self.transit_lag.append(_created_at(out.call, sent).timestamp() - sent.timestamp())
+                self.recent_lags.append(_created_at(out.call, sent).timestamp() - a["created_sim"])
             await self._handle_place_outcome(a, out)
         finally:
             self.inflight.discard(rid)
@@ -266,7 +280,8 @@ class Dispatcher:
             xs = sorted(xs)
             return {"n": len(xs), "p50": round(xs[len(xs) // 2], 1), "p99": round(xs[int(len(xs) * 0.99)], 1),
                     "max": round(xs[-1], 1)}
-        return {"decide_to_send": pct(self.queue_lag), "send_to_accept": pct(self.transit_lag)}
+        return {"decide_to_send": pct(self.queue_lag), "send_to_accept": pct(self.transit_lag),
+                "guard_s": round(self.guard.total_seconds(), 1)}
 
 
 def _created_at(call: dict, fallback: datetime) -> datetime:

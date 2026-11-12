@@ -276,3 +276,26 @@ async def test_window_rechecked_at_send_time(store, cfg, clock):
     assert p.posts == []
     assert {store.attempt(a["request_id"])["note"] for a in claimed} == {"window_closed_before_send"}
     assert store.live_count("acme") == 0
+
+
+@pytest.mark.asyncio
+async def test_guard_widens_with_observed_latency_and_survives_restart(store, cfg, clock):
+    """R1: if the provider is slow to accept, stop starting calls earlier before a window closes."""
+    class SlowProvider(FakeProvider):
+        async def place(self, request_id, *a, **kw):
+            out = await super().place(request_id, *a, **kw)
+            out.call["created_at"] = (clock.now() + timedelta(seconds=600)).isoformat()  # 10 sim min late
+            return out
+
+    d = make(store, cfg, clock, SlowProvider())
+    base = d.guard
+    a = d.dispatch_once(clock.now())[0]
+    await d.place(a)
+    assert d.guard == timedelta(seconds=750)       # 1.25 x 600 s
+    assert d.guard > base
+    clock.current = ist(2026, 11, 13, 18, 48)      # 12 min before renew closes: inside the 12.5 min guard
+    assert "c_renew" in d.dialable_campaigns(clock.now() - timedelta(minutes=2))["acme"]   # 14 min: still fine
+    assert "c_renew" not in d.dialable_campaigns(clock.now())["acme"]
+
+    restarted = make(Store(store.path, cfg), cfg, clock, FakeProvider(), worker="w-new")
+    assert restarted.guard == timedelta(seconds=750)

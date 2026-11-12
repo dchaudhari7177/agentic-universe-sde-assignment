@@ -254,6 +254,13 @@ class Store:
             "SELECT a.*, w.heartbeat_real FROM attempts a LEFT JOIN workers w ON w.worker_id = a.owner"
             " WHERE a.state = 'intent' ORDER BY a.created_real").fetchall()
 
+    def recent_accept_lags(self, n: int) -> list[float]:
+        """Sim seconds from decision to provider acceptance for the last n calls we placed directly."""
+        rows = self.conn.execute(
+            "SELECT accepted_sim - created_sim FROM attempts WHERE resolved_by = 'post' AND accepted_sim IS NOT NULL"
+            " ORDER BY accepted_sim DESC LIMIT ?", (n,)).fetchall()
+        return [max(0.0, r[0]) for r in reversed(rows)]
+
     def accepted_older_than(self, sim_cutoff: float) -> list[sqlite3.Row]:
         """Accepted calls with no result yet, accepted at or before `sim_cutoff`."""
         return self.conn.execute(
