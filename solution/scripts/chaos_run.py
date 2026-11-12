@@ -5,7 +5,7 @@
     python solution/scripts/chaos_run.py --seed 3 --kills 0 --failure-scale 0   # clean run
     python solution/scripts/chaos_run.py --seed 5 --kills 3 --workers 2         # two dispatchers, one DB
 
-It starts the original mock provider, runs `python -m solution run` against it, kills a
+It starts the original, unmodified mock provider (via mock_launcher.py; see the Windows note there), runs `python -m solution run` against it, kills a
 dispatcher with SIGKILL (TerminateProcess on Windows) at random moments, restarts it on the same
 database, and finally runs `python -m solution verify`. Exit code 0 means zero violations and a
 final_state.csv identical to the provider's /admin/leads.
@@ -68,8 +68,9 @@ def main() -> int:
     print(f"workdir: {work}", flush=True)
 
     mock_log = open(os.path.join(work, "mock.log"), "w")
+    launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_launcher.py")
     mock = subprocess.Popen(
-        [sys.executable, "-m", "mock_telephony", "--seed", str(args.seed), "--speed", str(args.speed),
+        [sys.executable, launcher, "--seed", str(args.seed), "--speed", str(args.speed),
          "--failure-scale", str(args.failure_scale), "--port", str(args.mock_port)],
         cwd=MOCK_DIR, stdout=mock_log, stderr=subprocess.STDOUT)
     procs: dict[int, subprocess.Popen] = {}

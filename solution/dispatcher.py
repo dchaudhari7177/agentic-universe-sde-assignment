@@ -60,7 +60,11 @@ class Dispatcher:
         # latency is 2 simulated minutes, so the guard scales with the clock speed.
         self.guard = timedelta(seconds=max(self.s.window_guard_s, clock.sim_seconds(self.s.latency_budget_real_s)))
         self.stats = {"placed": 0, "http_503": 0, "unknown": 0, "rejected": 0, "polled_results": 0,
-                      "recovered_intents": 0}
+                      "recovered_intents": 0, "skipped_window_closed": 0}
+        self.last_polled: dict[str, float] = {}  # request_id -> real time; losing it on a crash is harmless
+        # Sim seconds from "decided to dial" to "request sent", and from "sent" to "provider accepted".
+        self.queue_lag: list[float] = []
+        self.transit_lag: list[float] = []
 
     # ------------------------------------------------------------------ scheduling
     def dialable_campaigns(self, now: datetime) -> dict[str, set[str]]:
@@ -104,7 +108,19 @@ class Dispatcher:
         rid = a["request_id"]
         self.inflight.add(rid)
         try:
+            # Re-check R1 at the moment of sending, not only at the moment of deciding: if the event
+            # loop was busy, the window may have closed in between. Nothing has been sent, so
+            # releasing the claim is safe.
+            sent = self.clock.now()
+            policy = self.cfg.campaigns[a["campaign_id"]].policy
+            if not policy.can_start(sent, self.guard):
+                self.stats["skipped_window_closed"] += 1
+                self.store.mark_not_placed(rid, sent, sent, "window_closed_before_send")
+                return
+            self.queue_lag.append(sent.timestamp() - a["created_sim"])
             out = await self.provider.place(rid, a["campaign_id"], a["lead_id"], a["phone"], self.s.callback_url)
+            if out.kind == "accepted":
+                self.transit_lag.append(_created_at(out.call, sent).timestamp() - sent.timestamp())
             await self._handle_place_outcome(a, out)
         finally:
             self.inflight.discard(rid)
@@ -180,8 +196,11 @@ class Dispatcher:
                 self._spawn(self.resolve(rid))
 
         now_sim = self.clock.now().timestamp()
-        for a in self.store.accepted_due_for_poll(now_sim, now_real, self.s.poll_after_s, self.s.poll_every_real_s):
-            self.store.touch_polled(a["request_id"])
+        for a in self.store.accepted_older_than(now_sim - self.s.poll_after_s):
+            rid = a["request_id"]
+            if now_real - self.last_polled.get(rid, 0.0) < self.s.poll_every_real_s:
+                continue
+            self.last_polled[rid] = now_real
             self._spawn(self._poll(a))
 
     async def _poll(self, a) -> None:
@@ -225,7 +244,8 @@ class Dispatcher:
                     log("dispatch_error", error=repr(e))
                 if time.time() - last_report > 5:
                     last_report = time.time()
-                    log("progress", sim_now=now.isoformat(), **self.store.summary(), stats=self.stats)
+                    log("progress", sim_now=now.isoformat(), **self.store.summary(), stats=self.stats,
+                        lag_sim_s=self.lag_summary())
                 try:
                     await asyncio.wait_for(self.wake.wait(), self.s.tick_real_s)
                 except asyncio.TimeoutError:
@@ -237,7 +257,16 @@ class Dispatcher:
             for t in background:
                 t.cancel()
             await asyncio.gather(*background, return_exceptions=True)
-        log("dispatcher_done", sim_now=self.clock.now().isoformat(), stats=self.stats)
+        log("dispatcher_done", sim_now=self.clock.now().isoformat(), stats=self.stats, lag_sim_s=self.lag_summary())
+
+    def lag_summary(self) -> dict:
+        def pct(xs: list[float]) -> dict:
+            if not xs:
+                return {}
+            xs = sorted(xs)
+            return {"n": len(xs), "p50": round(xs[len(xs) // 2], 1), "p99": round(xs[int(len(xs) * 0.99)], 1),
+                    "max": round(xs[-1], 1)}
+        return {"decide_to_send": pct(self.queue_lag), "send_to_accept": pct(self.transit_lag)}
 
 
 def _created_at(call: dict, fallback: datetime) -> datetime:

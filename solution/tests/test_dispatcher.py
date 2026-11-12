@@ -259,3 +259,20 @@ def test_retry_waits_exactly_until_eligible(store, cfg, clock):
     assert d.dispatch_once(clock.now()) == []
     clock.current = ist(2026, 11, 13, 13, 0)
     assert [x["lead_id"] for x in d.dispatch_once(clock.now())] == ["z2"]
+
+
+@pytest.mark.asyncio
+async def test_window_rechecked_at_send_time(store, cfg, clock):
+    """R1: claimed just before close, but the loop stalled past it -> never sent, claim released."""
+    p = FakeProvider()
+    clock.current = ist(2026, 11, 12, 18, 57)      # renew still open (closes 19:00, guard 2 min at 600x)
+    d = make(store, cfg, clock, p)
+    store.conn.execute("UPDATE leads SET eligible_at=1e12 WHERE campaign_id <> 'c_renew'")
+    claimed = d.dispatch_once(clock.now())
+    assert claimed
+    clock.current = ist(2026, 11, 12, 18, 58, 30)  # event loop was busy for 90 sim seconds
+    for a in claimed:
+        await d.place(a)
+    assert p.posts == []
+    assert {store.attempt(a["request_id"])["note"] for a in claimed} == {"window_closed_before_send"}
+    assert store.live_count("acme") == 0

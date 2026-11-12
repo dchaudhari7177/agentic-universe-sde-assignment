@@ -137,11 +137,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("export", help="rewrite final_state.csv from the database")
 
     args = ap.parse_args(argv)
+    # Windows' default Proactor loop can stop accepting connections for good after a peer resets
+    # mid-accept (WinError 64). The selector loop doesn't have that failure mode.
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
     try:
-        if args.cmd == "run":
-            return asyncio.run(cmd_run(args))
-        if args.cmd == "verify":
-            return asyncio.run(cmd_verify(args))
+        if args.cmd in ("run", "verify"):
+            with asyncio.Runner(loop_factory=loop_factory) as runner:  # Python 3.11+
+                return runner.run(cmd_run(args) if args.cmd == "run" else cmd_verify(args))
         return cmd_export(args)
     except StateMismatch as e:
         print(f"error: {e}", file=sys.stderr)

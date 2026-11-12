@@ -83,7 +83,6 @@ CREATE TABLE IF NOT EXISTS attempts (
     created_sim      REAL    NOT NULL,
     created_real     REAL    NOT NULL,
     accepted_sim     REAL,
-    last_polled_real REAL,
     status           TEXT,
     disposition      TEXT,
     callback_at      REAL,
@@ -170,7 +169,10 @@ class Store:
         self.conn = sqlite3.connect(path, isolation_level=None, timeout=30, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=FULL")
+        # WAL + NORMAL: a committed transaction survives a process crash (kill -9), because the WAL
+        # write has reached the OS. FULL would add an fsync per commit, which only buys protection
+        # against power loss and stalls the event loop for milliseconds on every transition.
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         self._seed()
@@ -252,15 +254,11 @@ class Store:
             "SELECT a.*, w.heartbeat_real FROM attempts a LEFT JOIN workers w ON w.worker_id = a.owner"
             " WHERE a.state = 'intent' ORDER BY a.created_real").fetchall()
 
-    def accepted_due_for_poll(self, now_sim: float, now_real: float, min_age_sim: float,
-                              every_real: float) -> list[sqlite3.Row]:
+    def accepted_older_than(self, sim_cutoff: float) -> list[sqlite3.Row]:
+        """Accepted calls with no result yet, accepted at or before `sim_cutoff`."""
         return self.conn.execute(
-            "SELECT * FROM attempts WHERE state = 'accepted' AND accepted_sim <= ?"
-            " AND (last_polled_real IS NULL OR last_polled_real <= ?) ORDER BY accepted_sim",
-            (now_sim - min_age_sim, now_real - every_real)).fetchall()
-
-    def touch_polled(self, request_id: str) -> None:
-        self.conn.execute("UPDATE attempts SET last_polled_real=? WHERE request_id=?", (time.time(), request_id))
+            "SELECT * FROM attempts WHERE state = 'accepted' AND accepted_sim <= ? ORDER BY accepted_sim",
+            (sim_cutoff,)).fetchall()
 
     def heartbeat(self, worker_id: str) -> None:
         now = time.time()
